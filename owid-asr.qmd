@@ -19,51 +19,54 @@ This report calculates and compares death rates from Chronic Obstructive Pulmona
 To calculate crude death rates from COPD, we need the total number of COPD deaths and total population in each country. To calculate total deaths, we can use the provided death rates in combination with UN population data.
 
 ```{python}
-#| echo: true
-#| warning: true
-#| message: true
+# | echo: true
+# | warning: true
+# | message: true
 
 import pandas as pd
 
 # Ingest and transform demographic Data
-pop_2019 = pd.read_excel(
-    "data/WPP2022_POP_F02_1_POPULATION_5-YEAR_AGE_GROUPS_BOTH_SEXES.xlsx",
-    sheet_name="Estimates",
-    header=16,
-    usecols=[
-        "Region, subregion, country or area *",
-        "Year",
-    ] + [f"{i}-{i+4}" for i in range(0, 100, 5)] + ["100+"],
-).rename(
-    columns={
-        "Region, subregion, country or area *": "Country",
-        "Total Population, as of 1 July (thousands)": "Pop (10E-3)",
-    }
-).melt(  # Convert to long format
-    id_vars=["Country", "Year"],
-    value_vars=[f"{i}-{i+4}" for i in range(0, 100, 5)] + ["100+"],
-    var_name="Age",
-    value_name="Pop (10E-3)"
-)[lambda x: x["Year"] == 2019].drop("Year", axis=1)
+pop_2019 = (
+    pd.read_excel(
+        "data/WPP2022_POP_F02_1_POPULATION_5-YEAR_AGE_GROUPS_BOTH_SEXES.xlsx",
+        sheet_name="Estimates",
+        header=16,
+        usecols=[
+            "Region, subregion, country or area *",
+            "Year",
+        ] + [f"{i}-{i+4}" for i in range(0, 100, 5)] + ["100+"]
+    )
+    .rename(
+        columns={
+            "Region, subregion, country or area *": "Country",
+            "Total Population, as of 1 July (thousands)": "Pop (10E-3)",
+        }
+    )
+    # convert to long format
+    .melt(
+        id_vars=["Country", "Year"],
+        value_vars=[f"{i}-{i+4}" for i in range(0, 100, 5)] + ["100+"],
+        var_name="Age",
+        value_name="Pop (10E-3)"
+    )[lambda x: x["Year"] == 2019].drop("Year", axis=1)
+)
+
 
 def agg_over85(df):
     """Aggregate all 85+ age groups into a single category.
     This is to match the WHO standard population distribution."""
 
     ages = ["85-89", "90-94", "95-99", "100+"]
-    over_85s_total = df[df["Age"].isin(ages)]["Pop (10E-3)"].sum()
-    df = df[~df["Age"].isin(ages)]
-    df = pd.concat(
-        [
-            df,
-            pd.DataFrame({
-                "Country": [df.iloc[0]["Country"]],
-                "Age": ["85+"],
-                "Pop (10E-3)": [over_85s_total]})
-        ],
-        ignore_index=True
-    )
-    return df
+    under_85s = df[~df["Age"].isin(ages)] 
+
+    over_85s = pd.DataFrame({
+        "Country": [df.iloc[0]["Country"]],
+        "Age": ["85+"],
+        "Pop (10E-3)": [df[df["Age"].isin(ages)]["Pop (10E-3)"].sum()]
+    })
+    
+    return pd.concat([under_85s, over_85s], ignore_index=True)
+
 
 uganda_2019 = agg_over85(pop_2019[pop_2019["Country"] == "Uganda"])
 usa_2019 = agg_over85(
@@ -73,9 +76,10 @@ usa_2019 = agg_over85(
 # Calculate crude death rates
 copd_mortality = pd.read_excel("data/mortality-rates.xlsx")
 
+
 def crude_death_rate(mortalities, populations):
-    pop = populations * 1000
-    return round(((mortalities * pop).sum() / pop.sum()), 1)
+    return round(((mortalities * populations).sum() / populations.sum()), 1)
+
 
 uganda_mortalities = copd_mortality["Death rate, Uganda, 2019"]
 usa_mortalities = copd_mortality["Death rate, United States, 2019"]
@@ -109,8 +113,8 @@ population_weights = who_population["WHO World Standard*"][:-1] / 100
 # Since we have age specific death rates and the standard population, we don"t
 # need totals -- we can calculate the age standardised rate directly
 
-uganda_asr = (uganda_mortalities *  population_weights).sum().round(1)
-usa_asr = (usa_mortalities *  population_weights).sum().round(1)
+uganda_asr = round(uganda_mortalities.dot(population_weights), 1)
+usa_asr = round(usa_mortalities.dot(population_weights), 1)
 ```
 
 ```{python}
@@ -141,7 +145,7 @@ usa_2019["RelPop"] = (
     usa_2019["Pop (10E-3)"] * 100 / usa_2019["Pop (10E-3)"].sum()
 )
 
-over50 = ["50-54", "55-59", "60-64", "65-69", "70-74", "75-79", "80-84", "85+"]
+over50 = [f"{i}-{i+4}" for i in range(50, 85, 5)] + ["85+"]
 
 # Percentage over 50 for both countries
 uganda_over50 = round(
@@ -164,43 +168,27 @@ USA: {usa_over50}%
 
 # This is why the crude death rate is so much higher in the USA
 
-import matplotlib.pyplot as plt
+from math import ceil
+from lets_plot import *
+from lets_plot.mapping import as_discrete
+LetsPlot.setup_html()
 
-# Plot the age distribution of the two countries
-def draw_population_pyramid(uganda_data, usa_data):
-    fig, axes = plt.subplots(ncols=2, sharey=True, figsize=(9, 6))
+uganda_2019["RelPop"] = -uganda_2019["RelPop"]
+combined = pd.concat([uganda_2019, usa_2019])
 
-    axes[0].barh(
-        uganda_data["Age"],
-        -uganda_data["RelPop"],
-        align="center",
-        color="lightblue"
+limit = max(abs(combined["RelPop"].min()), abs(combined["RelPop"]).max())
+limit = ceil(limit / 5) * 5
+
+breaks = [n for n in range(-int(limit), int(limit)+1, 5)]
+
+(
+    ggplot(combined, aes(x=as_discrete("Age"), y="RelPop", fill="Country")) +
+    geom_bar(stat="identity") +
+    coord_flip() +
+    scale_y_continuous(
+        breaks=breaks,
+        labels=[str(abs(n)) for n in breaks],
+        limits=[-20,20]
     )
-
-    axes[1].barh(
-        usa_data["Age"],
-        usa_data["RelPop"],
-        align="center",
-        color="salmon"
-    )
-
-    axes[0].set(title="Uganda")
-    axes[1].set(title="USA")
-    axes[0].set_ylabel("Age Group")
-    lim = max(uganda_data["RelPop"])
-    axes[0].set_xlim(-lim * 1.05, 0)
-    axes[1].set_xlim(0, lim * 1.05)
-
-    # Clean up tick labels
-    axes[0].set_xticklabels([str(abs(int(x))) for x in axes[0].get_xticks()])
-    axes[1].set_xticklabels([str(int(x)) for x in axes[1].get_xticks()])
-
-    axes[1].tick_params(axis="y", labelleft=False)
-
-    fig.subplots_adjust(wspace=0)
-    fig.text(0.5, 0.04, "Percentage of Population", ha="center")
-    plt.show()
-
-
-draw_population_pyramid(uganda_2019, usa_2019)
+)
 ```
